@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Open Claude Code",
+      "type": "shell",
+      "command": "${workspaceFolder}/run-claude-safe.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "runOptions": {
+        "instanceLimit": 99
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Open Claude Code (⚠️ Skip All Permissions)",
+      "type": "shell",
+      "command": "${workspaceFolder}/run-claude.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "runOptions": {
+        "instanceLimit": 99
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "clear": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}
