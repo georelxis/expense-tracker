@@ -268,11 +268,68 @@ function setupPDFFont(doc){
   doc.setFont('DejaVuSans');
 }
 // ═══════════════════════════════════════════════════════════════
-// DB
+// DB — IndexedDB-backed with synchronous memory cache
 // ═══════════════════════════════════════════════════════════════
 const DB={
-  _get(k,def){try{return JSON.parse(localStorage.getItem(k))||def;}catch{return def;}},
-  _set(k,v){localStorage.setItem(k,JSON.stringify(v));},
+  _cache:{athm_txns:[],athm_reports:[],athm_members:[],athm_depts:[],athm_categories:null,athm_cat_rules:{},athm_counter:0,athm_counter_tp:0},
+  _idb:null,_ready:false,
+  // IndexedDB persistence (async, fire-and-forget writes)
+  _idbSave(k,v){
+    if(!DB._idb)return;
+    try{const tx=DB._idb.transaction('kv','readwrite');tx.objectStore('kv').put({key:k,value:v});}catch(e){console.warn('DB save error:',e);}
+  },
+  _idbGet(k){
+    return new Promise((res)=>{
+      if(!DB._idb){res(undefined);return;}
+      try{const r=DB._idb.transaction('kv','readonly').objectStore('kv').get(k);r.onsuccess=()=>res(r.result?r.result.value:undefined);r.onerror=()=>res(undefined);}catch(e){res(undefined);}
+    });
+  },
+  async _initIDB(){
+    return new Promise((res,rej)=>{
+      const r=indexedDB.open('athm_db',1);
+      r.onerror=()=>rej(r.error);
+      r.onsuccess=()=>{DB._idb=r.result;res();};
+      r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains('kv'))db.createObjectStore('kv',{keyPath:'key'});};
+    });
+  },
+  async _loadFromIDB(){
+    const keys=Object.keys(DB._cache);
+    for(const k of keys){
+      const val=await DB._idbGet(k);
+      if(val!==undefined)DB._cache[k]=val;
+    }
+  },
+  _migrateFromLocalStorage(){
+    // One-time migration: move data from localStorage to IndexedDB
+    const lsKeys=['athm_txns','athm_reports','athm_members','athm_depts','athm_categories','athm_cat_rules'];
+    let migrated=false;
+    lsKeys.forEach(k=>{
+      try{
+        const raw=localStorage.getItem(k);
+        if(raw){
+          const val=JSON.parse(raw);
+          if(val&&(Array.isArray(val)?val.length:true)){
+            // Only migrate if IDB doesn't already have data for this key
+            if(!DB._cache[k]||!DB._cache[k].length){DB._cache[k]=val;}
+            DB._idbSave(k,val);
+            migrated=true;
+          }
+        }
+      }catch(e){}
+    });
+    ['athm_counter','athm_counter_tp'].forEach(k=>{
+      try{const v=parseInt(localStorage.getItem(k)||'0',10);if(v>0){DB._cache[k]=v;DB._idbSave(k,v);migrated=true;}}catch(e){}
+    });
+    if(migrated){
+      // Clear localStorage after successful migration to free space
+      lsKeys.forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});
+      ['athm_counter','athm_counter_tp'].forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});
+      console.log('Data migrated from localStorage to IndexedDB');
+    }
+  },
+  // Synchronous getters (read from memory cache)
+  _get(k,def){const v=DB._cache[k];return v!==undefined&&v!==null?v:def;},
+  _set(k,v){DB._cache[k]=v;DB._idbSave(k,v);},
   getMembers(){return this._get('athm_members',[]);},
   saveMembers(m){this._set('athm_members',m);},
   getMemberById(id){return this.getMembers().find(m=>m.id===id);},
@@ -282,22 +339,29 @@ const DB={
   saveTxns(t){this._set('athm_txns',t);},
   getReports(){return this._get('athm_reports',[]);},
   saveReports(r){this._set('athm_reports',r);},
-  getCounter(){return parseInt(localStorage.getItem('athm_counter')||'0',10);},
-  nextCounter(){const c=this.getCounter()+1;localStorage.setItem('athm_counter',c.toString());return c;},
-  getCounterTP(){return parseInt(localStorage.getItem('athm_counter_tp')||'0',10);},
-  nextCounterTP(){const c=this.getCounterTP()+1;localStorage.setItem('athm_counter_tp',c.toString());return c;},
-  init(){if(!this.getDepts().length)this.saveDepts([{id:'dept_1',name:'General'}]);}
+  getCounter(){return DB._cache.athm_counter||0;},
+  nextCounter(){const c=this.getCounter()+1;DB._cache.athm_counter=c;DB._idbSave('athm_counter',c);return c;},
+  getCounterTP(){return DB._cache.athm_counter_tp||0;},
+  nextCounterTP(){const c=this.getCounterTP()+1;DB._cache.athm_counter_tp=c;DB._idbSave('athm_counter_tp',c);return c;},
+  async init(){
+    try{await DB._initIDB();await DB._loadFromIDB();DB._migrateFromLocalStorage();DB._ready=true;}catch(e){console.warn('IndexedDB init failed, using memory only:',e);}
+    if(!this.getDepts().length)this.saveDepts([{id:'dept_1',name:'General'}]);
+  }
 };
-DB.init();
+DB.init().then(()=>{if(typeof render==='function')render();});
 
 // ═══════════════════════════════════════════════════════════════
 // ATTACHMENTS (IndexedDB)
 // ═══════════════════════════════════════════════════════════════
 const ATT={
   _db:null,_ready:false,_queue:[],
-  init(){return new Promise((res,rej)=>{const r=indexedDB.open('athm_attachments',1);r.onerror=()=>rej(r.error);r.onsuccess=()=>{ATT._db=r.result;ATT._ready=true;ATT._queue.forEach(fn=>fn());ATT._queue=[];res();};r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains('files')){const s=db.createObjectStore('files',{keyPath:'id'});s.createIndex('txnId','txnId',{unique:false});}};});},
+  init(){
+    // Request persistent storage for larger quota
+    if(navigator.storage&&navigator.storage.persist){navigator.storage.persist().then(granted=>{if(granted)console.log('Persistent storage granted');}).catch(()=>{});}
+    return new Promise((res,rej)=>{const r=indexedDB.open('athm_attachments',1);r.onerror=()=>rej(r.error);r.onsuccess=()=>{ATT._db=r.result;ATT._ready=true;ATT._queue.forEach(fn=>fn());ATT._queue=[];res();};r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains('files')){const s=db.createObjectStore('files',{keyPath:'id'});s.createIndex('txnId','txnId',{unique:false});}};});
+  },
   _tx(mode){return ATT._db.transaction('files',mode).objectStore('files');},
-  save(att){return new Promise((res,rej)=>{const r=ATT._tx('readwrite').put(att);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});},
+  save(att){return new Promise((res,rej)=>{const r=ATT._tx('readwrite').put(att);r.onsuccess=()=>res();r.onerror=()=>{if(r.error&&r.error.name==='QuotaExceededError'){rej(new Error('Storage full. Try clearing old reports or attachments to free space.'));}else{rej(r.error);}};});},
   getByTxn(txnId){return new Promise((res,rej)=>{const r=ATT._tx('readonly').index('txnId').getAll(txnId);r.onsuccess=()=>res(r.result||[]);r.onerror=()=>rej(r.error);});},
   getById(id){return new Promise((res,rej)=>{const r=ATT._tx('readonly').get(id);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});},
   del(id){return new Promise((res,rej)=>{const r=ATT._tx('readwrite').delete(id);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});},
@@ -439,6 +503,21 @@ async function importZIP(file){
     S.importMsg=null;render();
   }
 }
+// Compress image to reduce storage: max 1600px, JPEG quality 0.6
+function compressImage(dataUri,maxDim,quality){
+  maxDim=maxDim||1600;quality=quality||0.6;
+  return new Promise((res,rej)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let w=img.width,h=img.height;
+      if(w>maxDim||h>maxDim){const r=Math.min(maxDim/w,maxDim/h);w=Math.round(w*r);h=Math.round(h*r);}
+      const c=document.createElement('canvas');c.width=w;c.height=h;
+      const ctx=c.getContext('2d');ctx.drawImage(img,0,0,w,h);
+      res(c.toDataURL('image/jpeg',quality));
+    };
+    img.onerror=rej;img.src=dataUri;
+  });
+}
 async function autoMatchReceipts(receiptEntries){
   const txns=DB.getTxns();
   // Build a map: expenseId → transaction id
@@ -462,18 +541,22 @@ async function autoMatchReceipts(receiptEntries){
     const mime=mimeMap[ext]||'application/octet-stream';
     // Read file data as base64
     const b64=await entry.async('base64');
-    const dataUri='data:'+mime+';base64,'+b64;
-    // Estimate size
-    const sizeBytes=Math.round(b64.length*3/4);
-    if(sizeBytes>5*1024*1024){skipped++;continue;}
+    let dataUri='data:'+mime+';base64,'+b64;
+    // Compress images to save storage space (resize to max 1600px, JPEG quality 0.6)
+    if(mime.startsWith('image/')){
+      try{dataUri=await compressImage(dataUri,1600,0.6);}catch(e){}
+    }
+    // Estimate size after compression
+    const compB64=dataUri.split(',')[1]||b64;
+    const sizeBytes=Math.round(compB64.length*3/4);
+    if(sizeBytes>20*1024*1024){skipped++;continue;}
     // Create thumbnail for images
     let thumb=null;
     if(mime.startsWith('image/')){
       try{thumb=await makeThumbnail(dataUri);}catch(e){}
     }
-    const att={id:uid(),txnId:txnId,name:fname,type:mime,size:sizeBytes,data:dataUri,thumb:thumb};
-    await ATT.save(att);
-    matched++;
+    const att={id:uid(),txnId:txnId,name:fname,type:mime.startsWith('image/')?'image/jpeg':mime,size:sizeBytes,data:dataUri,thumb:thumb};
+    try{await ATT.save(att);matched++;}catch(saveErr){if(saveErr.message&&saveErr.message.includes('Storage full')){alert('Storage is full. '+matched+' receipts were saved before running out of space. Try clearing old reports/attachments to free space.');break;}else{skipped++;continue;}}
   }
   const prev=S.importMsg||'';
   S.importMsg=prev+(matched?` | ${matched} receipts auto-matched`:'')+(skipped?` (${skipped} receipts skipped)`:'');
@@ -1273,13 +1356,19 @@ async function handleAttach(idx,ev){
   const errors=[];
   for(const file of files){
     if(!valid.includes(file.type)){errors.push(file.name+': unsupported type');continue;}
-    if(file.size>5*1024*1024){errors.push(file.name+': exceeds 5 MB');continue;}
+    if(file.size>20*1024*1024){errors.push(file.name+': exceeds 20 MB');continue;}
     try{
-      const data=await readFileB64(file);
-      const att={id:uid(),txnId:exp.transactionId,name:file.name,type:file.type,size:file.size,data:data,thumb:null};
-      if(file.type.startsWith('image/'))att.thumb=await makeThumbnail(data);
+      let data=await readFileB64(file);
+      let storeType=file.type;
+      let storeSize=file.size;
+      // Compress images to save storage space
+      if(file.type.startsWith('image/')){
+        try{data=await compressImage(data,1600,0.6);storeType='image/jpeg';const cb64=data.split(',')[1];storeSize=Math.round(cb64.length*3/4);}catch(ce){}
+      }
+      const att={id:uid(),txnId:exp.transactionId,name:file.name,type:storeType,size:storeSize,data:data,thumb:null};
+      if(storeType.startsWith('image/'))att.thumb=await makeThumbnail(data);
       await ATT.save(att);
-    }catch(e){errors.push(file.name+': '+e.message);}
+    }catch(e){errors.push(file.name+': '+(e.message||e));}
   }
   ev.target.value='';
   loadAttList(idx,exp.transactionId);
@@ -1604,7 +1693,15 @@ function renderSettings(){
       <button class="tab ${S.settingsTab==='categories'?'active':''}" onclick="setState({settingsTab:'categories'})">Categories (${getCategories().length})</button>
     </div>
     ${S.settingsTab==='members'?renderMembers(members,depts):S.settingsTab==='depts'?renderDepts(depts,members):renderCategoriesTab()}
-    <div class="mt-8" style="border-top:1px solid var(--gray-200);padding-top:24px">
+    <div class="mb-4" style="border-top:1px solid var(--gray-200);padding-top:24px">
+      <span class="text-sm font-semibold text-gray-700">Backup &amp; Restore</span>
+      <div class="flex gap-2 mt-2">
+        <button class="btn btn-primary btn-sm" onclick="exportAllData()"><svg class="icon-sm"><use href="#ico-download"/></svg> Export All Data</button>
+        <button class="btn btn-secondary btn-sm" onclick="importAllData()"><svg class="icon-sm"><use href="#ico-upload"/></svg> Import Data</button>
+      </div>
+      <span class="text-xs text-gray-400 mt-1" style="display:block">Export downloads a JSON backup of all data including attachments</span>
+    </div>
+    <div class="mt-4">
       <button class="btn btn-danger btn-sm" onclick="clearAllData()">Clear All Data</button>
       <span class="text-xs text-gray-400" style="margin-left:8px">Remove all transactions, reports, and members</span>
     </div>`;
@@ -1672,12 +1769,49 @@ function deleteCategory(name){
   const idx=NEEDS_CAR_PLATE.indexOf(name);if(idx>=0)NEEDS_CAR_PLATE.splice(idx,1);
   render();
 }
-function resetCategories(){if(!confirm('Reset to default categories? Custom categories will be lost.'))return;localStorage.removeItem('athm_categories');render();}
+function resetCategories(){if(!confirm('Reset to default categories? Custom categories will be lost.'))return;DB._set('athm_categories',null);try{localStorage.removeItem('athm_categories');}catch(e){}render();}
 
 function openEditMember(id){const m=DB.getMemberById(id);if(m)setModal({type:'editMember',data:{...m}});}
 function deleteMember(id){if(!confirm('Delete this member?'))return;DB.saveMembers(DB.getMembers().filter(m=>m.id!==id));render();}
 function deleteDept(id){if(!confirm('Delete this department?'))return;DB.saveDepts(DB.getDepts().filter(d=>d.id!==id));const members=DB.getMembers();members.filter(m=>m.department===id).forEach(m=>m.department='');DB.saveMembers(members);render();}
-function clearAllData(){if(!confirm('This will delete ALL data. Are you sure?'))return;['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories'].forEach(k=>localStorage.removeItem(k));try{indexedDB.deleteDatabase('athm_attachments');ATT.init().catch(()=>{});}catch(e){}DB.init();S.selectedTxns=new Set();S.filterMember='';render();}
+function clearAllData(){if(!confirm('This will delete ALL data. Are you sure?'))return;['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories'].forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});try{indexedDB.deleteDatabase('athm_attachments');ATT.init().catch(()=>{});}catch(e){}try{indexedDB.deleteDatabase('athm_db');}catch(e){}DB._cache={athm_txns:[],athm_reports:[],athm_members:[],athm_depts:[],athm_categories:null,athm_counter:0,athm_counter_tp:0};DB.init().then(()=>{S.selectedTxns=new Set();S.filterMember='';render();});}
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORT / IMPORT ALL DATA
+// ═══════════════════════════════════════════════════════════════
+async function exportAllData(){
+  const data={_export:'athm',_version:1,_date:new Date().toISOString()};
+  const keys=['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories','athm_cat_rules'];
+  keys.forEach(k=>{const v=DB._cache[k];if(v!==undefined&&v!==null)data[k]=v;});
+  try{
+    const allFiles=await new Promise((res,rej)=>{const r=ATT._tx('readonly').getAll();r.onsuccess=()=>res(r.result||[]);r.onerror=()=>rej(r.error);});
+    if(allFiles.length)data._attachments=allFiles;
+  }catch(e){console.warn('Could not export attachments:',e);}
+  const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='expense-tracker-backup-'+new Date().toISOString().slice(0,10)+'.json';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+}
+
+function importAllData(){
+  const inp=document.createElement('input');inp.type='file';inp.accept='.json';
+  inp.onchange=async()=>{
+    const file=inp.files[0];if(!file)return;
+    try{
+      const text=await file.text();const data=JSON.parse(text);
+      if(data._export!=='athm')return alert('Invalid backup file.');
+      if(!confirm('This will REPLACE all current data with the imported backup. Continue?'))return;
+      const keys=['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories','athm_cat_rules'];
+      keys.forEach(k=>{if(data[k]!==undefined){DB._cache[k]=data[k];DB._idbSave(k,data[k]);}});
+      if(data._attachments&&data._attachments.length){
+        for(const att of data._attachments){await ATT.save(att);}
+      }
+      alert('Data imported successfully! ('+(data.athm_txns?data.athm_txns.length:0)+' transactions)');
+      S.selectedTxns=new Set();S.filterMember='';render();
+    }catch(e){alert('Error importing data: '+e.message);}
+  };
+  inp.click();
+}
 
 // ═══════════════════════════════════════════════════════════════
 // MODAL
