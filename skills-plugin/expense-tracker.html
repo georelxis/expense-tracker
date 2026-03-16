@@ -230,7 +230,7 @@ function suggestCategory(merchant){
   const rules=DB._get('athm_cat_rules',{});
   if(rules[key])return rules[key];
   // 2. Partial match on rules
-  for(const rKey in rules){if(key.includes(rKey)||rKey.includes(key))return rules[rKey];}
+  for(const rKey of Object.keys(rules)){if(key.includes(rKey)||rKey.includes(key))return rules[rKey];}
   // 3. Learn from existing categorized expenses in reports
   const reports=DB.getReports();const cats=getCategories();
   const freq={};
@@ -386,7 +386,7 @@ function setModal(m){S.modal=m;if(!m){const o=document.getElementById('modalOver
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 function uid(){return Date.now().toString(36)+Math.random().toString(36).substr(2,6);}
-function fmtDate(d){if(!d)return'';const p=d.split('-');if(p.length===3)return`${p[2]}/${p[1]}/${p[0]}`;const dt=new Date(d);if(isNaN(dt))return d;return`${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}/${dt.getFullYear()}`;}
+function fmtDate(d){if(!d)return'';d=d.substring(0,10);const p=d.split('-');if(p.length===3)return`${p[2]}/${p[1]}/${p[0]}`;const dt=new Date(d);if(isNaN(dt))return d;return`${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}/${dt.getFullYear()}`;}
 function fmtMonth(d){const dt=new Date(d);const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return months[dt.getMonth()]+' '+dt.getFullYear();}
 function getMonthKey(d){const dt=new Date(d);return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0');}
 function reportTouchesMonth(r,monthKey){
@@ -400,7 +400,7 @@ function reportMonthAmount(r,monthKey){
 }
 function reportLabel(r){return r.reportType==='thirdparty'?'TP-'+r.reportNumber:'#'+r.reportNumber;}
 function reportTitle(r){return r.reportType==='thirdparty'?'Third Party Payments':'Expense Report';}
-function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function esc(s){if(!s)return'';const d=document.createElement('div');d.textContent=s;return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function optHtml(opts,ph,sel){let h=`<option value="">${esc(ph)}</option>`;opts.forEach(o=>{h+=`<option value="${esc(o)}"${o===sel?' selected':''}>${esc(o)}</option>`;});return h;}
 function isoToDisplay(d){if(!d)return'';const p=d.split('-');if(p.length===3)return p[2]+'/'+p[1]+'/'+p[0];return d;}
 function displayToIso(d){if(!d)return'';const p=d.split('/');if(p.length===3)return p[2]+'-'+p[1]+'-'+p[0];return d;}
@@ -460,7 +460,7 @@ function processCSVData(rows){
     if(!member)member=members.find(m=>m.name.toLowerCase()===payer.toLowerCase());
     if(!member){member={id:'mem_'+uid(),name:payer,department:'',cardNumbers:card?[card]:[]};members.push(member);newMembers++;}
     else if(card&&(!member.cardNumbers||!member.cardNumbers.includes(card))){if(!member.cardNumbers)member.cardNumbers=[];member.cardNumbers.push(card);}
-    newTxns.push({id:txnId,expenseId:(row['Expense ID']||'').trim(),date:(row['Transaction started (UTC)']||'').trim(),merchant:(row['Transaction description']||'').trim(),payer,memberId:member.id,cardNumber:card,amount:parseAmount(row['Orig amount (Orig currency)']),currency:(row['Orig currency']||'EUR').trim(),description:(row['Expense description']||'').trim(),receipts:parseInt(row['Receipts'])||0,taxName:(row['Tax name']||'').trim(),taxRate:(row['Tax rate']||'').trim(),taxAmount:parseAmount(row['Tax amount (Orig currency)']),revolCategory:(row['Expense category name']||'').trim(),reportId:null,importedAt:new Date().toISOString()});
+    newTxns.push({id:txnId,expenseId:(row['Expense ID']||'').trim(),date:(row['Transaction started (UTC)']||'').trim().substring(0,10),merchant:(row['Transaction description']||'').trim(),payer,memberId:member.id,cardNumber:card,amount:parseAmount(row['Orig amount (Orig currency)']),currency:(row['Orig currency']||'EUR').trim(),description:(row['Expense description']||'').trim(),receipts:parseInt(row['Receipts'])||0,taxName:(row['Tax name']||'').trim(),taxRate:(row['Tax rate']||'').trim(),taxAmount:parseAmount(row['Tax amount (Orig currency)']),revolCategory:(row['Expense category name']||'').trim(),reportId:null,importedAt:new Date().toISOString()});
     newCount++;
   });
   if(newTxns.length||updatedCount)DB.saveTxns([...existing,...newTxns]);
@@ -685,6 +685,10 @@ function toggleTxn(id,checked){if(checked)S.selectedTxns.add(id);else S.selected
 function toggleSelectAll(checked){
   let txns=DB.getTxns();
   if(S.filterMember)txns=txns.filter(t=>t.memberId===S.filterMember);
+  if(!S.showAssigned)txns=txns.filter(t=>!t.reportId);
+  if(S.filterDateFrom){const iso=displayToIso(S.filterDateFrom);if(iso)txns=txns.filter(t=>t.date>=iso);}
+  if(S.filterDateTo){const iso=displayToIso(S.filterDateTo);if(iso)txns=txns.filter(t=>t.date<=iso);}
+  if(S.searchQuery){const q=S.searchQuery.toLowerCase();const members=DB.getMembers();txns=txns.filter(t=>{const mem=members.find(m=>m.id===t.memberId);return(t.merchant||'').toLowerCase().includes(q)||(t.description||'').toLowerCase().includes(q)||(t.revolCategory||'').toLowerCase().includes(q)||(t.txnNote||'').toLowerCase().includes(q)||(mem&&mem.name.toLowerCase().includes(q))||String(t.amount).includes(q);});}
   txns=txns.filter(t=>!t.reportId);
   if(checked)txns.forEach(t=>S.selectedTxns.add(t.id));else txns.forEach(t=>S.selectedTxns.delete(t.id));
   render();
@@ -1198,12 +1202,12 @@ function updVatLine(idx,vi,key,val){
   // Priority 1: Rate + LineTotal → Net + VAT (most common manual use)
   if((key==='lineTotal'||key==='rate')&&vl.lineTotal!=null&&vl.rate!=null){
     vl.net=Math.round(vl.lineTotal/(1+vl.rate/100)*100)/100;
-    vl.vat=Math.round((vl.lineTotal-vl.net)*100)/100;
+    vl.vat=+(vl.lineTotal-vl.net).toFixed(2);
   }
   // Priority 2: Rate + Net → VAT + LineTotal
   else if((key==='net'||key==='rate')&&vl.net!=null&&vl.rate!=null){
     vl.vat=Math.round(vl.net*vl.rate/100*100)/100;
-    vl.lineTotal=Math.round((vl.net+vl.vat)*100)/100;
+    vl.lineTotal=+(vl.net+vl.vat).toFixed(2);
   }
   // Priority 3: Net + VAT → infer rate + lineTotal
   else if(key==='vat'&&vl.net!=null&&vl.vat!=null&&vl.net>0){
@@ -1675,9 +1679,9 @@ function editReport(){
   setState({screen:'reportForm'});
 }
 function deleteReport(id){
-  if(!confirm('Delete this report? Transactions will become unassigned.'))return;
+  if(!confirm('Delete this report? Transactions will become unassigned. Attachments will be kept.'))return;
   const txns=DB.getTxns();const report=DB.getReports().find(r=>r.id===id);
-  if(report){report.expenses.forEach(e=>{const t=txns.find(tx=>tx.id===e.transactionId);if(t)t.reportId=null;ATT.delByTxn(e.transactionId).catch(()=>{});});DB.saveTxns(txns);}
+  if(report){report.expenses.forEach(e=>{const t=txns.find(tx=>tx.id===e.transactionId);if(t)t.reportId=null;});DB.saveTxns(txns);}
   DB.saveReports(DB.getReports().filter(r=>r.id!==id));setState({screen:'reports',currentReport:null});
 }
 
@@ -1769,12 +1773,12 @@ function deleteCategory(name){
   const idx=NEEDS_CAR_PLATE.indexOf(name);if(idx>=0)NEEDS_CAR_PLATE.splice(idx,1);
   render();
 }
-function resetCategories(){if(!confirm('Reset to default categories? Custom categories will be lost.'))return;DB._set('athm_categories',null);try{localStorage.removeItem('athm_categories');}catch(e){}render();}
+function resetCategories(){if(!confirm('Reset to default categories? Custom categories will be lost.'))return;DB._set('athm_categories',null);try{localStorage.removeItem('athm_categories');}catch(e){}Object.keys(CATEGORY_HINTS).forEach(k=>{if(!DEFAULT_CATEGORIES.includes(k))delete CATEGORY_HINTS[k];});NEEDS_CAR_PLATE.length=0;["Fuel","Parking","Vehicle maintenance / service","Vehicle rental","Tolls"].forEach(c=>NEEDS_CAR_PLATE.push(c));render();}
 
 function openEditMember(id){const m=DB.getMemberById(id);if(m)setModal({type:'editMember',data:{...m}});}
 function deleteMember(id){if(!confirm('Delete this member?'))return;DB.saveMembers(DB.getMembers().filter(m=>m.id!==id));render();}
 function deleteDept(id){if(!confirm('Delete this department?'))return;DB.saveDepts(DB.getDepts().filter(d=>d.id!==id));const members=DB.getMembers();members.filter(m=>m.department===id).forEach(m=>m.department='');DB.saveMembers(members);render();}
-function clearAllData(){if(!confirm('This will delete ALL data. Are you sure?'))return;['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories'].forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});try{indexedDB.deleteDatabase('athm_attachments');ATT.init().catch(()=>{});}catch(e){}try{indexedDB.deleteDatabase('athm_db');}catch(e){}DB._cache={athm_txns:[],athm_reports:[],athm_members:[],athm_depts:[],athm_categories:null,athm_counter:0,athm_counter_tp:0};DB.init().then(()=>{S.selectedTxns=new Set();S.filterMember='';render();});}
+function clearAllData(){if(!confirm('This will delete ALL data. Are you sure?'))return;['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories','athm_cat_rules'].forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});try{indexedDB.deleteDatabase('athm_attachments');ATT.init().catch(()=>{});}catch(e){}try{indexedDB.deleteDatabase('athm_db');}catch(e){}DB._cache={athm_txns:[],athm_reports:[],athm_members:[],athm_depts:[],athm_categories:null,athm_cat_rules:{},athm_counter:0,athm_counter_tp:0};DB.init().then(()=>{S.selectedTxns=new Set();S.filterMember='';render();});}
 
 // ═══════════════════════════════════════════════════════════════
 // EXPORT / IMPORT ALL DATA
@@ -1802,7 +1806,13 @@ function importAllData(){
       if(data._export!=='athm')return alert('Invalid backup file.');
       if(!confirm('This will REPLACE all current data with the imported backup. Continue?'))return;
       const keys=['athm_txns','athm_reports','athm_members','athm_depts','athm_counter','athm_counter_tp','athm_categories','athm_cat_rules'];
+      // Clear existing data first
+      keys.forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});
+      DB._cache={athm_txns:[],athm_reports:[],athm_members:[],athm_depts:[],athm_categories:null,athm_cat_rules:{},athm_counter:0,athm_counter_tp:0};
+      // Import new data
       keys.forEach(k=>{if(data[k]!==undefined){DB._cache[k]=data[k];DB._idbSave(k,data[k]);}});
+      // Clear and re-import attachments
+      try{indexedDB.deleteDatabase('athm_attachments');await ATT.init();}catch(e){}
       if(data._attachments&&data._attachments.length){
         for(const att of data._attachments){await ATT.save(att);}
       }
@@ -2123,11 +2133,11 @@ function setupPostRender(){
   if(S.screen==='review'&&ATT._ready)reviewLoadAttFlags();
 }
 async function loadAttFlags(){
-  const txns=DB.getTxns();
-  for(const t of txns){
-    const el=document.getElementById('att_'+t.id);if(!el)continue;
+  const els=document.querySelectorAll('[id^="att_"]');
+  for(const el of els){
+    const txnId=el.id.substring(4);
     try{
-      const items=await ATT.getByTxn(t.id);
+      const items=await ATT.getByTxn(txnId);
       if(items.length){el.innerHTML='<svg style="width:14px;height:14px;color:var(--blue-500)" title="'+items.length+' attachment'+(items.length>1?'s':'')+'"><use href="#ico-paperclip"/></svg>';}
     }catch(e){}
   }
