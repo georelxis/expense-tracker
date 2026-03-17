@@ -473,7 +473,7 @@ ATT.init().catch(e=>console.warn('IndexedDB:',e));
 // ═══════════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════════
-let S={screen:'dashboard',settingsTab:'members',filterMember:'',filterDateFrom:'',filterDateTo:'',searchQuery:'',selectedTxns:new Set(),showAssigned:false,currentReport:null,editingExpenses:[],editMeta:null,modal:null,reportsMonth:'',importMsg:null,autoGen:null,reviewMonth:'',reviewAttCache:{},dashFilter:'month',dashFrom:'',dashTo:''};
+let S={screen:'dashboard',settingsTab:'members',filterMember:'',filterDateFrom:'',filterDateTo:'',searchQuery:'',filterCategory:'',selectedTxns:new Set(),showAssigned:false,currentReport:null,editingExpenses:[],editMeta:null,modal:null,reportsMonth:'',importMsg:null,autoGen:null,reviewMonth:'',reviewAttCache:{},dashFilter:'month',dashFrom:'',dashTo:''};
 function setState(p){Object.assign(S,p);render();}
 let _searchTimer=null;
 function searchDebounce(el){
@@ -794,7 +794,7 @@ function dashBarTooltipHide(){const tt=document.getElementById('barTooltip');if(
 
 // #5 — Click-through navigation
 function dashGoMonth(mk){setState({screen:'transactions',filterDateFrom:mk+'-01',filterDateTo:mk+'-31',showAssigned:true});}
-function dashGoCat(cat){setState({screen:'transactions',searchQuery:cat,showAssigned:true});}
+function dashGoCat(cat){setState({screen:'transactions',filterCategory:cat,searchQuery:'',showAssigned:true});}
 
 // #2 — Percentage change helper
 function pctChange(curr,prev){
@@ -1006,6 +1006,7 @@ function renderTransactions(){
   if(!S.showAssigned)txns=txns.filter(t=>!t.reportId);
   if(S.filterDateFrom){const iso=displayToIso(S.filterDateFrom);if(iso)txns=txns.filter(t=>t.date>=iso);}
   if(S.filterDateTo){const iso=displayToIso(S.filterDateTo);if(iso)txns=txns.filter(t=>t.date<=iso);}
+  if(S.filterCategory){const rc=buildReportCatMap();txns=txns.filter(t=>txnCategory(t,rc)===S.filterCategory);}
   if(S.searchQuery){const q=S.searchQuery.toLowerCase();txns=txns.filter(t=>{const mem=members.find(m=>m.id===t.memberId);return(t.merchant||'').toLowerCase().includes(q)||(t.description||'').toLowerCase().includes(q)||(t.revolCategory||'').toLowerCase().includes(q)||(t.txnNote||'').toLowerCase().includes(q)||(mem&&mem.name.toLowerCase().includes(q))||String(t.amount).includes(q);});}
   txns.sort((a,b)=>b.date.localeCompare(a.date));
   const selCount=[...S.selectedTxns].filter(id=>txns.some(t=>t.id===id&&!t.reportId)).length;
@@ -1031,6 +1032,7 @@ function renderTransactions(){
     <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
       <div class="flex items-center gap-3 flex-wrap">
         <div style="position:relative"><svg style="position:absolute;left:8px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--gray-400);pointer-events:none"><use href="#ico-search"/></svg><input type="text" id="searchInput" placeholder="Search transactions..." value="${esc(S.searchQuery)}" oninput="searchDebounce(this)" style="padding-left:28px;width:200px;font-size:12px;padding-top:6px;padding-bottom:6px">${S.searchQuery?`<button onclick="S.searchQuery='';S.selectedTxns=new Set();render();" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--gray-400);font-size:14px;line-height:1">&times;</button>`:''}</div>
+        ${S.filterCategory?`<span style="display:inline-flex;align-items:center;gap:4px;background:var(--blue-50,#eff6ff);color:var(--blue-700,#1d4ed8);border:1px solid var(--blue-200,#bfdbfe);border-radius:9999px;padding:3px 10px;font-size:12px;font-weight:500">Category: ${esc(S.filterCategory)}<button onclick="S.filterCategory='';S.selectedTxns=new Set();render();" style="background:none;border:none;cursor:pointer;color:var(--blue-400,#60a5fa);font-size:14px;line-height:1;padding:0 0 0 2px">&times;</button></span>`:''}
         <select style="width:auto;min-width:220px" onchange="S.filterMember=this.value;S.selectedTxns=new Set();render();">
           <option value="">All Members (${txns.length})</option>
           ${memberOpts.map(m=>`<option value="${m.id}"${S.filterMember===m.id?' selected':''}>${esc(m.name)} (${m.count})</option>`).join('')}
@@ -1077,6 +1079,7 @@ function toggleSelectAll(checked){
   if(!S.showAssigned)txns=txns.filter(t=>!t.reportId);
   if(S.filterDateFrom){const iso=displayToIso(S.filterDateFrom);if(iso)txns=txns.filter(t=>t.date>=iso);}
   if(S.filterDateTo){const iso=displayToIso(S.filterDateTo);if(iso)txns=txns.filter(t=>t.date<=iso);}
+  if(S.filterCategory){const rc=buildReportCatMap();txns=txns.filter(t=>txnCategory(t,rc)===S.filterCategory);}
   if(S.searchQuery){const q=S.searchQuery.toLowerCase();const members=DB.getMembers();txns=txns.filter(t=>{const mem=members.find(m=>m.id===t.memberId);return(t.merchant||'').toLowerCase().includes(q)||(t.description||'').toLowerCase().includes(q)||(t.revolCategory||'').toLowerCase().includes(q)||(t.txnNote||'').toLowerCase().includes(q)||(mem&&mem.name.toLowerCase().includes(q))||String(t.amount).includes(q);});}
   txns=txns.filter(t=>!t.reportId);
   if(checked)txns.forEach(t=>S.selectedTxns.add(t.id));else txns.forEach(t=>S.selectedTxns.delete(t.id));
